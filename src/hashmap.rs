@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{Hash, Hasher},
 };
 
 pub struct HashMap<K, V> {
@@ -107,11 +107,13 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
                     first_deleted = Some((probe_index + i as usize) & self.bucket_mask);
                 }
             }
+            stride += 8;
+            probe_index = (probe_index + stride) & self.bucket_mask;
         }
     }
 
     fn hash(&self, key: &K) -> usize {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = fxhash::FxHasher::default();
         key.hash(&mut hasher);
         hasher.finish() as usize
     }

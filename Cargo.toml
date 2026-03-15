@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+fxhash = "0.2.1"
+
+[dev-dependencies]
+criterion = "0.8.2"
+rand = "0.10.0"
+
+[[bench]]
+name = "hashmap_bench"
+harness = false
