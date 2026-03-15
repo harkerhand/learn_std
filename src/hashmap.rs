@@ -32,7 +32,11 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         let ctrl_size = (capacity + 8) * std::mem::size_of::<u8>();
         let mut ctrl = unsafe {
             std::alloc::alloc(
-                std::alloc::Layout::from_size_align(bucket_size + ctrl_size, 1).unwrap(),
+                std::alloc::Layout::from_size_align(
+                    bucket_size + ctrl_size,
+                    std::mem::align_of::<(K, V)>().max(8),
+                )
+                .unwrap(),
             )
         };
         ctrl = unsafe { ctrl.add(bucket_size) };
@@ -56,7 +60,6 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         let tag = (hash & 0x7F) as u8;
         let mut probe_index = hash & self.bucket_mask;
         let mut stride = 0;
-        let mut first_deleted = None;
 
         loop {
             let group_bytes = self.get_group_bytes(probe_index);
@@ -78,14 +81,11 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
                 }
                 match_mask &= match_mask - 1;
             }
-
-            let empty_mask = self.match_group(group_bytes, 0xFF);
-            if empty_mask != 0 {
-                let index = if let Some(deleted_index) = first_deleted {
-                    deleted_index
-                } else {
-                    (probe_index + empty_mask.trailing_zeros() as usize / 8) & self.bucket_mask
-                };
+            let free_mask =
+                self.match_group(group_bytes, 0xFF) | self.match_group(group_bytes, 0xFE);
+            if free_mask != 0 {
+                let index =
+                    (probe_index + free_mask.trailing_zeros() as usize / 8) & self.bucket_mask;
                 let item_ptr = unsafe {
                     (self.ctrl as *mut (K, V))
                         .sub(self.bucket_mask + 1)
@@ -98,14 +98,6 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
                 self.items += 1;
                 self.growth_left -= 1;
                 return;
-            }
-
-            if first_deleted.is_none() {
-                let delete_mask = self.match_group(group_bytes, 0xFE);
-                if delete_mask != 0 {
-                    let i = delete_mask.trailing_zeros() / 8;
-                    first_deleted = Some((probe_index + i as usize) & self.bucket_mask);
-                }
             }
             stride += 8;
             probe_index = (probe_index + stride) & self.bucket_mask;
@@ -244,12 +236,12 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         x.wrapping_sub(0x0101010101010101) & !x & 0x8080808080808080
     }
 
+    #[inline(always)]
     fn update_ctrl(&mut self, index: usize, tag: u8) {
         unsafe {
             *self.ctrl.add(index) = tag;
-            if index < 8 {
-                *self.ctrl.add(self.bucket_mask + 1 + index) = tag;
-            }
+            let mirror_index = (index.wrapping_sub(8) & self.bucket_mask).wrapping_add(8);
+            *self.ctrl.add(mirror_index) = tag;
         }
     }
 }
