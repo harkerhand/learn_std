@@ -59,14 +59,15 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
             bucket_mask,
             data,
             ctrl,
-            growth_left: capacity,
+            growth_left: capacity >> 1,
             items: 0,
             _marker: std::marker::PhantomData,
         }
     }
 
+    #[inline(always)]
     pub fn insert(&mut self, key: K, value: V) {
-        if self.items * 8 >= (self.bucket_mask + 1) * 7 || self.items + 1 >= self.growth_left {
+        if self.items >= self.growth_left {
             self.resize();
         }
 
@@ -109,6 +110,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         }
     }
 
+    #[inline(always)]
     fn insert_unchecked(&mut self, key: K, value: V) {
         let hash = self.hash(&key);
         let tag = (hash & 0x7F) as u8;
@@ -139,6 +141,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         hasher.finish() as usize
     }
 
+    #[inline(always)]
     pub fn get(&self, key: &K) -> Option<&V> {
         let hash = self.hash(key);
         let tag = (hash & 0x7F) as u8;
@@ -169,6 +172,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         }
     }
 
+    #[inline(always)]
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let hash = self.hash(key);
         let tag = (hash & 0x7F) as u8;
@@ -201,6 +205,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         }
     }
 
+    #[inline(always)]
     fn resize(&mut self) {
         let new_capacity = (self.bucket_mask + 1) * 2;
         let mut new_map = HashMap::with_capacity(new_capacity);
