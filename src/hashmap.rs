@@ -27,9 +27,9 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
             return Self::new();
         }
         capacity = capacity.next_power_of_two().max(8);
-        let bucket_mask = capacity.next_power_of_two() - 1;
-        let bucket_size = (bucket_mask + 1) * std::mem::size_of::<(K, V)>();
-        let ctrl_size = (bucket_mask + 1) * std::mem::size_of::<u8>();
+        let bucket_mask = capacity - 1;
+        let bucket_size = capacity * std::mem::size_of::<(K, V)>();
+        let ctrl_size = (capacity + 8) * std::mem::size_of::<u8>();
         let mut ctrl = unsafe {
             std::alloc::alloc(
                 std::alloc::Layout::from_size_align(bucket_size + ctrl_size, 1).unwrap(),
@@ -55,66 +55,58 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
 
         let tag = (hash & 0x7F) as u8;
         let mut probe_index = hash & self.bucket_mask;
+        let mut stride = 0;
+        let mut first_deleted = None;
+
         loop {
             let group_bytes = self.get_group_bytes(probe_index);
-            let empty_mask = self.match_group(group_bytes, 0xFF);
-            if empty_mask != 0 {
-                for i in 0..8 {
-                    if (empty_mask & (1 << (7 - i))) != 0 {
-                        let item_ptr = unsafe {
-                            (self.ctrl as *mut (K, V))
-                                .sub(self.bucket_mask + 1)
-                                .add((probe_index + i) & self.bucket_mask)
-                        };
-                        unsafe {
-                            *item_ptr = (key, value);
-                            *self.ctrl.add((probe_index + i) & self.bucket_mask) = tag;
-                        }
-                        self.items += 1;
-                        self.growth_left -= 1;
+
+            let mut match_mask = self.match_group(group_bytes, tag);
+            while match_mask != 0 {
+                let i = match_mask.trailing_zeros() / 8;
+                let index = (probe_index + i as usize) & self.bucket_mask;
+                let item_ptr = unsafe {
+                    (self.ctrl as *mut (K, V))
+                        .sub(self.bucket_mask + 1)
+                        .add(index)
+                };
+                unsafe {
+                    if (*item_ptr).0 == key {
+                        (*item_ptr).1 = value;
                         return;
                     }
                 }
+                match_mask &= match_mask - 1;
             }
 
-            let delete_mask = self.match_group(group_bytes, 0xFE);
-            if delete_mask != 0 {
-                for i in 0..8 {
-                    if (delete_mask & (1 << (7 - i))) != 0 {
-                        let item_ptr = unsafe {
-                            (self.ctrl as *mut (K, V))
-                                .sub(self.bucket_mask + 1)
-                                .add((probe_index + i) & self.bucket_mask)
-                        };
-                        unsafe {
-                            *item_ptr = (key, value);
-                            *self.ctrl.add((probe_index + i) & self.bucket_mask) = tag;
-                        }
-                        self.items += 1;
-                        self.growth_left -= 1;
-                        return;
-                    }
+            let empty_mask = self.match_group(group_bytes, 0xFF);
+            if empty_mask != 0 {
+                let index = if let Some(deleted_index) = first_deleted {
+                    deleted_index
+                } else {
+                    (probe_index + empty_mask.trailing_zeros() as usize / 8) & self.bucket_mask
+                };
+                let item_ptr = unsafe {
+                    (self.ctrl as *mut (K, V))
+                        .sub(self.bucket_mask + 1)
+                        .add(index)
+                };
+                unsafe {
+                    *item_ptr = (key, value);
+                    self.update_ctrl(index, tag);
+                }
+                self.items += 1;
+                self.growth_left -= 1;
+                return;
+            }
+
+            if first_deleted.is_none() {
+                let delete_mask = self.match_group(group_bytes, 0xFE);
+                if delete_mask != 0 {
+                    let i = delete_mask.trailing_zeros() / 8;
+                    first_deleted = Some((probe_index + i as usize) & self.bucket_mask);
                 }
             }
-            let match_mask = self.match_group(group_bytes, tag);
-            if match_mask != 0 {
-                for i in 0..8 {
-                    if (match_mask & (1 << (7 - i))) != 0 {
-                        let item_ptr = unsafe {
-                            (self.ctrl as *mut (K, V))
-                                .sub(self.bucket_mask + 1)
-                                .add((probe_index + i) & self.bucket_mask)
-                        };
-                        unsafe {
-                            if (*item_ptr).0 == key {
-                                (*item_ptr).1 = value;
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            probe_index = (probe_index + 1) & self.bucket_mask;
         }
     }
 
@@ -128,31 +120,33 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         let hash = self.hash(key);
         let tag = (hash & 0x7F) as u8;
         let mut probe_index = hash & self.bucket_mask;
+        let mut stride = 0;
         loop {
             let group_bytes = self.get_group_bytes(probe_index);
-            let match_mask = self.match_group(group_bytes, tag);
-            if match_mask != 0 {
-                for i in 0..8 {
-                    if (match_mask & (1 << (7 - i))) != 0 {
-                        let item_ptr = unsafe {
-                            (self.ctrl as *mut (K, V))
-                                .sub(self.bucket_mask + 1)
-                                .add((probe_index + i) & self.bucket_mask)
-                        };
-                        unsafe {
-                            if (*item_ptr).0 == *key {
-                                return Some(&(*item_ptr).1);
-                            }
-                        }
+            let mut match_mask = self.match_group(group_bytes, tag);
+
+            while match_mask != 0 {
+                let i = match_mask.trailing_zeros() / 8;
+                let index = (probe_index + i as usize) & self.bucket_mask;
+                let item_ptr = unsafe {
+                    (self.ctrl as *mut (K, V))
+                        .sub(self.bucket_mask + 1)
+                        .add(index)
+                };
+                unsafe {
+                    if (*item_ptr).0 == *key {
+                        return Some(&(*item_ptr).1);
                     }
                 }
+                match_mask &= match_mask - 1;
             }
-            let empty_mask = self.match_group(group_bytes, 0xFF);
-            if empty_mask != 0 {
+
+            if self.match_group(group_bytes, 0xFF) != 0 {
                 return None;
             }
 
-            probe_index = (probe_index + 1) & self.bucket_mask;
+            stride += 8;
+            probe_index = (probe_index + stride) & self.bucket_mask;
         }
     }
 
@@ -160,38 +154,35 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         let hash = self.hash(key);
         let tag = (hash & 0x7F) as u8;
         let mut probe_index = hash & self.bucket_mask;
+        let mut stride = 0;
         loop {
             let group_bytes = self.get_group_bytes(probe_index);
-            let match_mask = self.match_group(group_bytes, tag);
-            if match_mask != 0 {
-                for i in 0..8 {
-                    if (match_mask & (1 << (7 - i))) != 0 {
-                        let item_ptr = unsafe {
-                            (self.ctrl as *mut (K, V))
-                                .sub(self.bucket_mask + 1)
-                                .add((probe_index + i) & self.bucket_mask)
-                        };
-                        unsafe {
-                            if (*item_ptr).0 == *key {
-                                let _key = std::ptr::read(&(*item_ptr).0);
-                                let value = std::mem::replace(
-                                    &mut (*item_ptr).1,
-                                    std::mem::MaybeUninit::uninit().assume_init(),
-                                );
-                                *self.ctrl.add((probe_index + i) & self.bucket_mask) = 0xFE;
-                                self.items -= 1;
-                                return Some(value);
-                            }
-                        }
+            let mut match_mask = self.match_group(group_bytes, tag);
+            while match_mask != 0 {
+                let i = match_mask.trailing_zeros() / 8;
+                let index = (probe_index + i as usize) & self.bucket_mask;
+                let item_ptr = unsafe {
+                    (self.ctrl as *mut (K, V))
+                        .sub(self.bucket_mask + 1)
+                        .add(index)
+                };
+                unsafe {
+                    if (*item_ptr).0 == *key {
+                        self.update_ctrl(index, 0xFE);
+                        std::ptr::drop_in_place(&mut (*item_ptr).0);
+                        let value = std::ptr::read(&(*item_ptr).1);
+                        self.items -= 1;
+                        return Some(value);
                     }
                 }
+                match_mask &= match_mask - 1;
             }
-            let empty_mask = self.match_group(group_bytes, 0xFF);
-            if empty_mask != 0 {
+            if self.match_group(group_bytes, 0xFF) != 0 {
                 return None;
             }
 
-            probe_index = (probe_index + 1) & self.bucket_mask;
+            stride += 8;
+            probe_index = (probe_index + stride) & self.bucket_mask;
         }
     }
 
@@ -200,7 +191,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         let mut new_map = HashMap::with_capacity(new_capacity);
         for i in 0..=self.bucket_mask {
             let group_ctrl = unsafe { *self.ctrl.add(i) };
-            if group_ctrl != 0xFF {
+            if group_ctrl < 0x80 {
                 let item_ptr =
                     unsafe { (self.ctrl as *mut (K, V)).sub(self.bucket_mask + 1).add(i) };
                 unsafe {
@@ -214,23 +205,22 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
     }
 
     fn get_group_bytes(&self, index: usize) -> u64 {
-        let mut group_bytes = 0u64;
-        for i in 0..8 {
-            group_bytes |=
-                (unsafe { *self.ctrl.add((index + i) & self.bucket_mask) } as u64) << ((7 - i) * 8);
-        }
-        group_bytes
+        unsafe { (self.ctrl.add(index) as *const u64).read_unaligned() }
     }
 
-    fn match_group(&self, group_bytes: u64, tag: u8) -> u8 {
-        let match_mask = group_bytes ^ (tag as u64 * 0x0101010101010101);
-        let mut result = 0u8;
-        for i in 0..8 {
-            if (match_mask & (0xFF << ((7 - i) * 8))) == 0 {
-                result |= 1 << (7 - i);
+    fn match_group(&self, group_bytes: u64, tag: u8) -> u64 {
+        let tag_broadcast = (tag as u64) * 0x0101010101010101;
+        let x = group_bytes ^ tag_broadcast;
+        x.wrapping_sub(0x0101010101010101) & !x & 0x8080808080808080
+    }
+
+    fn update_ctrl(&mut self, index: usize, tag: u8) {
+        unsafe {
+            *self.ctrl.add(index) = tag;
+            if index < 8 {
+                *self.ctrl.add(self.bucket_mask + 1 + index) = tag;
             }
         }
-        result
     }
 }
 
@@ -238,7 +228,7 @@ impl<K, V> Drop for HashMap<K, V> {
     fn drop(&mut self) {
         for i in 0..=self.bucket_mask {
             let group_ctrl = unsafe { *self.ctrl.add(i) };
-            if group_ctrl != 0xFF && group_ctrl != 0xFE {
+            if group_ctrl < 0x80 {
                 let item_ptr =
                     unsafe { (self.ctrl as *mut (K, V)).sub(self.bucket_mask + 1).add(i) };
                 unsafe {
@@ -247,8 +237,9 @@ impl<K, V> Drop for HashMap<K, V> {
             }
         }
         if !self.ctrl.is_null() {
-            let bucket_size = (self.bucket_mask + 1) * std::mem::size_of::<(K, V)>();
-            let ctrl_size = (self.bucket_mask + 1) * std::mem::size_of::<u8>();
+            let capacity = self.bucket_mask + 1;
+            let bucket_size = capacity * std::mem::size_of::<(K, V)>();
+            let ctrl_size = (capacity + 8) * std::mem::size_of::<u8>();
             unsafe {
                 std::alloc::dealloc(
                     self.ctrl.sub(bucket_size),
@@ -304,6 +295,6 @@ mod tests {
         let map: HashMap<(), ()> = HashMap::with_capacity(1);
         let tag = 0x7A; // 0b01111010
         let group_bytes = 0xFF7AFEFFFE7A7AFF;
-        assert_eq!(map.match_group(group_bytes, tag), 0b01000110);
+        assert_eq!(map.match_group(group_bytes, tag), 0x0080000000808000);
     }
 }
