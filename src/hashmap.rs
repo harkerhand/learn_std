@@ -59,7 +59,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
             bucket_mask,
             data,
             ctrl,
-            growth_left: capacity >> 1,
+            growth_left: capacity >> 2,
             items: 0,
             _marker: std::marker::PhantomData,
         }
@@ -102,7 +102,6 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
                     self.update_ctrl(index, tag);
                 }
                 self.items += 1;
-                self.growth_left -= 1;
                 return;
             }
             stride += GROUP_SIZE;
