@@ -112,6 +112,34 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         }
     }
 
+    fn insert_unchecked(&mut self, key: K, value: V) {
+        let hash = self.hash(&key);
+        let tag = (hash & 0x7F) as u8;
+        let mut probe_index = hash & self.bucket_mask;
+        let mut stride = 0;
+
+        loop {
+            let group_bytes = self.get_group_bytes(probe_index);
+            let empty_mask = self.match_group(group_bytes, 0xFF);
+            if empty_mask != 0 {
+                let index =
+                    (probe_index + empty_mask.trailing_zeros() as usize / 8) & self.bucket_mask;
+                let item_ptr = unsafe {
+                    (self.ctrl as *mut (K, V))
+                        .sub(self.bucket_mask + 1)
+                        .add(index)
+                };
+                unsafe {
+                    *item_ptr = (key, value);
+                    self.update_ctrl(index, tag);
+                }
+                return;
+            }
+            stride += 8;
+            probe_index = (probe_index + stride) & self.bucket_mask;
+        }
+    }
+
     fn hash(&self, key: &K) -> usize {
         let mut hasher = fxhash::FxHasher::default();
         key.hash(&mut hasher);
@@ -198,7 +226,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
                     unsafe { (self.ctrl as *mut (K, V)).sub(self.bucket_mask + 1).add(i) };
                 unsafe {
                     let (key, value) = std::ptr::read(item_ptr);
-                    new_map.insert(key, value);
+                    new_map.insert_unchecked(key, value);
                     *self.ctrl.add(i) = 0xFF;
                 }
             }
