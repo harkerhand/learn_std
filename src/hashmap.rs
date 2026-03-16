@@ -59,7 +59,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
             bucket_mask,
             data,
             ctrl,
-            growth_left: capacity >> 2,
+            growth_left: capacity * 7 / 8,
             items: 0,
             _marker: std::marker::PhantomData,
         }
@@ -73,7 +73,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
 
         let hash = self.hash(&key);
 
-        let tag = (hash & 0x7F) as u8;
+        let tag = (hash >> (usize::BITS - 7)) as u8;
         let mut probe_index = hash & self.bucket_mask;
         let mut stride = 0;
 
@@ -112,7 +112,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
     #[inline(always)]
     fn insert_unchecked(&mut self, key: K, value: V) {
         let hash = self.hash(&key);
-        let tag = (hash & 0x7F) as u8;
+        let tag = (hash >> (usize::BITS - 7)) as u8;
         let mut probe_index = hash & self.bucket_mask;
         let mut stride = 0;
 
@@ -126,6 +126,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
                     *item_ptr = (key, value);
                     self.update_ctrl(index, tag);
                 }
+                self.items += 1;
                 return;
             }
             stride += GROUP_SIZE;
@@ -143,7 +144,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
     #[inline(always)]
     pub fn get(&self, key: &K) -> Option<&V> {
         let hash = self.hash(key);
-        let tag = (hash & 0x7F) as u8;
+        let tag = (hash >> (usize::BITS - 7)) as u8;
         let mut probe_index = hash & self.bucket_mask;
         let mut stride = 0;
         loop {
@@ -174,7 +175,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
     #[inline(always)]
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let hash = self.hash(key);
-        let tag = (hash & 0x7F) as u8;
+        let tag = (hash >> (usize::BITS - 7)) as u8;
         let mut probe_index = hash & self.bucket_mask;
         let mut stride = 0;
         loop {
@@ -206,16 +207,22 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
 
     #[inline(always)]
     fn resize(&mut self) {
-        let new_capacity = (self.bucket_mask + 1) * 2;
+        let new_capacity = if self.ctrl.is_null() {
+            GROUP_SIZE
+        } else {
+            (self.bucket_mask + 1) * 2
+        };
         let mut new_map = HashMap::with_capacity(new_capacity);
-        for i in 0..=self.bucket_mask {
-            let group_ctrl = unsafe { *self.ctrl.add(i) };
-            if group_ctrl < 0x80 {
-                let item_ptr = unsafe { self.data.add(i) };
-                unsafe {
-                    let (key, value) = std::ptr::read(item_ptr);
-                    new_map.insert_unchecked(key, value);
-                    *self.ctrl.add(i) = 0xFF;
+        if !self.ctrl.is_null() {
+            for i in 0..=self.bucket_mask {
+                let group_ctrl = unsafe { *self.ctrl.add(i) };
+                if group_ctrl < 0x80 {
+                    let item_ptr = unsafe { self.data.add(i) };
+                    unsafe {
+                        let (key, value) = std::ptr::read(item_ptr);
+                        new_map.insert_unchecked(key, value);
+                        *self.ctrl.add(i) = 0xFF;
+                    }
                 }
             }
         }
@@ -245,12 +252,14 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
 
 impl<K, V> Drop for HashMap<K, V> {
     fn drop(&mut self) {
-        for i in 0..=self.bucket_mask {
-            let group_ctrl = unsafe { *self.ctrl.add(i) };
-            if group_ctrl < 0x80 {
-                let item_ptr = unsafe { self.data.add(i) };
-                unsafe {
-                    std::ptr::drop_in_place(item_ptr);
+        if !self.ctrl.is_null() {
+            for i in 0..=self.bucket_mask {
+                let group_ctrl = unsafe { *self.ctrl.add(i) };
+                if group_ctrl < 0x80 {
+                    let item_ptr = unsafe { self.data.add(i) };
+                    unsafe {
+                        std::ptr::drop_in_place(item_ptr);
+                    }
                 }
             }
         }
@@ -324,6 +333,36 @@ mod tests {
         assert_eq!(map.get(&"key3".to_string()), None);
         assert_eq!(map.remove(&"key1".to_string()), Some("value1"));
         assert_eq!(map.get(&"key1".to_string()), None);
+    }
+
+    #[test]
+    fn test_new_map_insert() {
+        let mut map = HashMap::new();
+        map.insert(1u64, "one");
+        map.insert(2u64, "two");
+        assert_eq!(map.get(&1u64), Some(&"one"));
+        assert_eq!(map.get(&2u64), Some(&"two"));
+        assert_eq!(map.get(&3u64), None);
+    }
+
+    #[test]
+    fn test_high_load_factor() {
+        let size = 200usize;
+        let mut map = HashMap::with_capacity(size);
+        for i in 0..size {
+            map.insert(i as u64, i as u64 * 2);
+        }
+        for i in 0..size {
+            assert_eq!(map.get(&(i as u64)), Some(&(i as u64 * 2)));
+        }
+    }
+
+    #[test]
+    fn test_update_existing_key() {
+        let mut map = HashMap::with_capacity(16);
+        map.insert(42u64, "first");
+        map.insert(42u64, "second");
+        assert_eq!(map.get(&42u64), Some(&"second"));
     }
 
     #[test]
