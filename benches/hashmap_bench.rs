@@ -1,4 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
+use hashbrown::HashMap as HashbrownMap;
 use learn_std::HashMap;
 use rand::prelude::*;
 use std::collections::HashMap as StdHashMap;
@@ -29,6 +30,16 @@ fn bench_insert(c: &mut Criterion) {
             black_box(map);
         })
     });
+
+    group.bench_function("Hashbrown HashMap", |b| {
+        b.iter(|| {
+            let mut map = HashbrownMap::with_capacity(size as usize);
+            for &key in &keys {
+                map.insert(key, key);
+            }
+            black_box(map);
+        })
+    });
     group.finish();
 }
 
@@ -40,9 +51,11 @@ fn bench_get(c: &mut Criterion) {
 
     let mut my_map = HashMap::with_capacity(size as usize);
     let mut std_map = StdHashMap::with_capacity(size as usize);
+    let mut hb_map = HashbrownMap::with_capacity(size as usize);
     for &key in &keys {
         my_map.insert(key, key);
         std_map.insert(key, key);
+        hb_map.insert(key, key);
     }
 
     group.bench_function("Custom Get", |b| {
@@ -57,6 +70,14 @@ fn bench_get(c: &mut Criterion) {
         b.iter(|| {
             for &key in &keys {
                 black_box(std_map.get(&key));
+            }
+        })
+    });
+
+    group.bench_function("Hashbrown Get", |b| {
+        b.iter(|| {
+            for &key in &keys {
+                black_box(hb_map.get(&key));
             }
         })
     });
